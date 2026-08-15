@@ -1,0 +1,22 @@
+# Build outputs (all levels)
+**/build/
+**/.gradle/
+**/.idea/
+**/.cxx/
+**/captures/
+**/app/release/
+
+*.iml
+.DS_Store
+
+# Local config (machine-specific)
+local.properties
+
+# Signing / secrets
+*.jks
+*.keystore
+keystore.properties
+
+# Room schema history (kept intentionally for migration tracking)
+!app/schemas/
+

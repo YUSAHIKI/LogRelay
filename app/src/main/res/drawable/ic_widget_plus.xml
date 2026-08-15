@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ウィジェット用の「記録する」アイコン。角の丸い太めのプラス記号で、
+     テキスト文字の「＋」よりも意図的にデザインされた質感を出す。
+     単色で描画し、実行時にColorFilter.tintで着色して使う。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M11,3.5
+                           C11,2.67 11.67,2 12.5,2
+                           C13.33,2 14,2.67 14,3.5
+                           L14,10
+                           L20.5,10
+                           C21.33,10 22,10.67 22,11.5
+                           C22,12.33 21.33,13 20.5,13
+                           L14,13
+                           L14,20.5
+                           C14,21.33 13.33,22 12.5,22
+                           C11.67,22 11,21.33 11,20.5
+                           L11,13
+                           L4.5,13
+                           C3.67,13 3,12.33 3,11.5
+                           C3,10.67 3.67,10 4.5,10
+                           L11,10
+                           Z" />
+</vector>

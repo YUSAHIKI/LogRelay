@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- ShareHelperが書き出す一時ファイル用 -->
+    <cache-path name="shared" path="shared/" />
+    <!-- カメラアプリが撮影した写真を書き込む一時ファイル用 -->
+    <cache-path name="captures" path="captures/" />
+</paths>

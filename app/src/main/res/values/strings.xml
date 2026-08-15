@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">LogRelay</string>
+    <string name="widget_a_description">ワンタップで位置と時刻を記録します</string>
+</resources>

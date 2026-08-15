@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ウィジェット選択画面用のプレビュー画像。実際のウィジェット(インディゴの角丸+プラスマーク)に近い見た目にしている -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+    <path
+        android:fillColor="#37477A"
+        android:pathData="M18,0 L78,0 A18,18 0,0 1,96 18 L96,78 A18,18 0,0 1,78 96 L18,96 A18,18 0,0 1,0 78 L0,18 A18,18 0,0 1,18 0 Z" />
+    <path
+        android:fillColor="#FAF7F0"
+        android:pathData="M44,20
+                           C44,17.79 45.79,16 48,16
+                           C50.21,16 52,17.79 52,20
+                           L52,44
+                           L76,44
+                           C78.21,44 80,45.79 80,48
+                           C80,50.21 78.21,52 76,52
+                           L52,52
+                           L52,76
+                           C52,78.21 50.21,80 48,80
+                           C45.79,80 44,78.21 44,76
+                           L44,52
+                           L20,52
+                           C17.79,52 16,50.21 16,48
+                           C16,45.79 17.79,44 20,44
+                           L44,44
+                           Z" />
+</vector>
