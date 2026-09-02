@@ -42,9 +42,10 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-// アプリ本体のテーマ(インディゴ×紙色)と統一。day/nightは区別せず同じ色を使う
-private val WidgetIndigo = ColorProvider(day = Color(0xFF37477A), night = Color(0xFF37477A))
-private val WidgetPaper = ColorProvider(day = Color(0xFFFAF7F0), night = Color(0xFFFAF7F0))
+// アプリ本体のテーマ(RelayLabデザイン基盤: Primaryインディゴ×Neutralオフホワイト)と統一。
+// day/nightは区別せず同じ色を使う。形状・タップ挙動は変更せず、配色のみ新トークンに合わせている。
+private val WidgetIndigo = ColorProvider(day = Color(0xFF1A237E), night = Color(0xFF1A237E))
+private val WidgetPaper = ColorProvider(day = Color(0xFFF9F9F8), night = Color(0xFFF9F9F8))
 
 // フィードバック表示中かどうか／直近の記録時刻を保持するGlance state用のキー
 private val FEEDBACK_TEXT_KEY = stringPreferencesKey("feedback_text")

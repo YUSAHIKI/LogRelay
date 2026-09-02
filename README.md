@@ -9,6 +9,15 @@
 4. ホーム画面を長押し→ウィジェット一覧から「QuickLog」を配置
 5. 初回はアプリ本体を一度起動して位置情報の権限を許可しておく（ウィジェット単体では権限ダイアログを出せないため）
 
+## アプリアイコンについて
+円＋中心の点、インディゴ背景というアイコンには、3つの意味を重ねている。
+
+- **判子(はんこ)**: 「その場に押す」記録行為そのもののメタファー
+- **0秒**: ワンタップで完了する、迷いのない記録のスピード感
+- **地図ピン**: 位置情報を記録するアプリであることの示唆
+
+RelayLabデザイン基盤への移行(2026年8月)で、UI上のドット方眼紙モチーフ・日付スタンプ風タイポグラフィといったビジュアル要素は撤去したが、この「判子・手帳文化への目配せ」という文脈自体はアイコンとこの説明文に残している。
+
 ## 今回の核心部分
 - `widget/QuickRecordWidget.kt` … ウィジェットA（即記録型）のUIとタップ時のアクション
 - `util/LocationHelper.kt` … ウィジェットタップという「一瞬で終えたい」文脈での位置情報取得（4秒タイムアウト、失敗しても時刻だけは残す設計）
@@ -25,3 +34,15 @@
 - Android 12+ の Doze/App Standby でウィジェットタップからの位置情報取得が安定して動くか
 - メーカー独自のバッテリー最適化機能（Xiaomiなど）でバックグラウンド処理がキルされないか
   → お使いのXiaomi 17 Ultraでの実機検証を最優先で行うのがおすすめです
+
+## 更新履歴
+- 2026-08-24: ステータスバー/ナビゲーションバーのアイコン色を修正。RelayLabデザイン移行で背景を明色(Neutral)にした際、`android:windowLightStatusBar`の指定が抜けており、Pixel等targetSdk 35+のedge-to-edgeが強制される端末で白背景に白アイコンが重なって見えなくなっていた。テーマ(`themes.xml`)とMainActivity(`WindowInsetsControllerCompat`)の両方で明示的に暗色アイコンを指定
+- 2026-08-23: WearOSトリガー機能 v1、「1起動1記録＋自動終了」方式を含めて実機検証完了(コード変更なし)。Galaxy Watch 6の物理ボタン(ホームキー)二回押しで15秒間隔の3回連続起動がすべて成功し、`finishAndRemoveTask()`によりタスクが残らないことを確認。GPS成功時(`watch_gps`)・失敗時(`manual_pending`へのフォールバック)とも正常動作。これでv1の全トリガー経路(ウィジェット/NFC/Wear Tile/ランチャー/ホームキー二回押し)が実機検証済みとなった。残るのはTile UIのデザインとフィードバック仕様(振動等)の確定のみ。設計仕様書([docs/wearos_trigger_design.md](docs/wearos_trigger_design.md))を検証結果(付録D)で更新
+- 2026-08-23: WearOSトリガー機能を「1起動1記録」方式に変更。記録完了(または失敗)のフィードバックを短時間(暫定1200ms)表示した後`finishAndRemoveTask()`でタスクごと終了するようにし、ホームキー二回押しでタスクが残った状態でも次回起動が必ず新規起動になるようにした。記録実行は`onCreate()`起点の初回コンポジションのみ・`savedInstanceState == null`の場合に限定し、Activity再生成時の重複記録を防止。「もう一度記録」ボタンは二重記録の窓を開けてしまうため削除。位置情報権限の要求は`SharedPreferences`で管理し、初回セットアップ時のみ(以後は毎回ダイアログを出さない)に変更。設計仕様書を実装内容で更新。この環境にはWearOS実機がないため、変更後の実機再検証はできていない
+- 2026-08-23: WearOSトリガー機能に「起動＝記録方式(案A)」を実装。Wear側の`MainActivity`は起動された時点(Tileタップ・ランチャー起動・Galaxy Watchのホームキー二回押しのいずれでも)で即座に記録処理を実行するよう変更し、`EXTRA_AUTO_SEND`によるタップ要否の分岐は廃止した。実機検証で判明した「ホームキー二回押しではアプリ起動までは成功するが、旧実装では画面上のタップがないと記録に到達しない」という問題への対応。この環境にはWearOS実機がないため、変更後の実機再検証はできていない
+- 2026-08-23: WearOSトリガー機能 v1、実機での動作検証完了(コード変更なし)。`watch_gps`/`manual_pending`両経路、Room v5→v6マイグレーション(既存83件保持)、UUID重複排除(`UNIQUE constraint failed`での拒否)を実機で確認。設計仕様書([docs/wearos_trigger_design.md](docs/wearos_trigger_design.md))を検証結果(付録C)で更新。詳細は仕様書を参照
+- 2026-08-23: WearOSトリガー機能 v1(Phase 3)完了。ホーム画面のタイル(`LogRelayTileService`)からワンタップで記録を送れるようになった。タイルの丸ボタンをタップ→`MainActivity`をEXTRA_AUTO_SEND付きで起動→自動送信、という流れ。`androidx.wear.tiles:tiles`は最新の1.6.2がKotlin 2.1でコンパイルされておりプロジェクトのKotlin 1.9.24と非互換だったため、互換性のある1.4.1に固定している。Tileの詳細なビジュアルデザイン・振動/トースト演出は未確定のまま最小構成
+- 2026-08-23: WearOSトリガー機能 v1(Phase 2)を追加。新規`:wear`モジュール(ウォッチ側アプリ)と`:wear-protocol`モジュール(フォン/ウォッチ間のDataClientプロトコル定数の共有元)を追加し、フォン側に`LogRelayWearableListenerService`を実装。ウォッチのタップ→GPS取得(8秒タイムアウト)→DataClient送信(`watch_gps`/`manual_pending`)→フォン側で受信・記録、の一連が動く状態。`sourceTriggerId`(UNIQUE制約)による重複防止も実装済み(Phase 1、Room v5→v6)。Tile UIは未実装(Phase 3)。`phone_gps_pending`はフェーズ2(付録B)へ先送り
+- 2026-08-20: NFCタグトリガーを追加(記録トリガーの拡張手段の先行実装)。対応タグにかざすと、ウィジェットタップと完全に同一の記録(タグなし・現在時刻固定)を作成する。設定画面の奥にタグ書き込み機能を内蔵。複数タグの識別・WearOS Companionとの統合は今回のスコープ外
+- 2026-08-20: RelayLabデザイン基盤への移行（配色をRelayLabのサブトラクティブ・パレット(#1A237E等)へ刷新、タイポグラフィをInter/JetBrains Monoに変更、ドット方眼紙モチーフ・日付スタンプ風タイポグラフィをUIから撤去。機能・挙動は変更なし）
+- 2026-08-17: RelayLabCommon切り出し（day-boundary判定ロジック`startOfLogicalDay`を、PhotoRelayと共有する共通Kotlinモジュール[RelayLabCommon](https://github.com/YUSAHIKI/RelayLabCommon)にgit submoduleとして分離。ロジック自体の変更はなし）

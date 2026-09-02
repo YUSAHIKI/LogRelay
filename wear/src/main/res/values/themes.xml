@@ -1,0 +1,7 @@
+<resources>
+    <!-- Wear ComposeのUI自体はcompose-material側のColors/Typographyで制御するため、
+         ここではsplash/システムUIに必要な最小限のテーマだけ定義する -->
+    <style name="Theme.LogRelayWear" parent="android:Theme.DeviceDefault">
+        <item name="android:colorBackground">#1A237E</item>
+    </style>
+</resources>

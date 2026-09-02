@@ -1,19 +1,26 @@
 package com.logrelay.app.ui
 
 import android.Manifest
+import android.app.PendingIntent
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.nfc.NfcAdapter
+import android.nfc.Tag
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.PickVisualMediaRequest
+import androidx.core.view.WindowCompat
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -65,11 +72,16 @@ import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TimePicker
 import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -85,6 +97,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -92,17 +105,19 @@ import com.logrelay.app.data.Record
 import com.logrelay.app.data.RecordRepository
 import com.logrelay.app.ui.theme.CalendarIcon
 import com.logrelay.app.ui.theme.CameraIcon
-import com.logrelay.app.ui.theme.DotGridBackground
 import com.logrelay.app.ui.theme.EdgeScrollbar
 import com.logrelay.app.ui.theme.EdgeScrollbarGrid
 import com.logrelay.app.ui.theme.PinIcon
 import com.logrelay.app.ui.theme.LogRelayColors
+import com.logrelay.app.ui.theme.RelayButtonColors
+import com.logrelay.app.util.NfcTrigger
 import com.logrelay.app.ui.theme.LogRelayTheme
 import com.logrelay.app.ui.theme.SavedCheckmark
-import com.logrelay.app.ui.theme.StampTextStyle
+import com.logrelay.app.ui.theme.MonoLabelStyle
 import com.logrelay.app.ui.theme.GridViewIcon
 import com.logrelay.app.ui.theme.ListViewIcon
 import com.logrelay.app.util.DateUtils
+import com.relaylab.common.DateUtils as RelayLabDateUtils
 import com.logrelay.app.util.GalleryStorage
 import com.logrelay.app.util.AutoBackupScheduler
 import com.logrelay.app.util.SettingsStore
@@ -114,13 +129,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 
 /** 日付フィルタの単位。DAY=特定の1日、MONTH=その月全体 */
-private enum class DateFilterMode { DAY, MONTH }
+private enum class DateFilterMode { DAY, WEEK, MONTH }
 
 /** ⋮メニューの階層。項目が増えたため2階層に分けている */
 private enum class MenuLevel { ROOT, EXPORT, BACKUP }
@@ -131,8 +147,23 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestMultiplePermissions()
     ) { /* 拒否されても時刻のみで動作継続するため、結果分岐は不要 */ }
 
+    private var nfcAdapter: NfcAdapter? = null
+
+    // NFCタグをかざすたびに増分するカウンタ。Composeはこの値の変化を検知して記録処理を呼ぶ
+    // (値そのものに意味はなく、LaunchedEffectのキーとして使うためだけの単調増加カウンタ)
+    private var nfcTriggerCount by mutableIntStateOf(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // 背景が明色(Neutral)のため、ステータスバー/ナビゲーションバーのアイコンを暗色側にする。
+        // テーマ側(windowLightStatusBar)だけだと、targetSdk 35+のedge-to-edge強制時に
+        // 効かないことがあるため、ここでも明示的に指定しておく(Pixel等で白背景に白アイコンが
+        // 重なって見えなくなる問題への対応)。
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = true
+            isAppearanceLightNavigationBars = true
+        }
 
         requestPermissionLauncher.launch(
             arrayOf(
@@ -142,22 +173,93 @@ class MainActivity : ComponentActivity() {
         )
 
         val repository = RecordRepository(applicationContext)
+        nfcAdapter = NfcAdapter.getDefaultAdapter(this)
+        handleIncomingIntent(intent)
 
         setContent {
             LogRelayTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    RecordScreen(repository)
+                    RecordScreen(
+                        repository = repository,
+                        nfcTriggerCount = nfcTriggerCount,
+                        nfcAvailable = nfcAdapter != null,
+                        onEnableNfcWriteMode = { onTagDiscovered -> enableNfcWriteMode(onTagDiscovered) },
+                        onDisableNfcWriteMode = { disableNfcWriteMode() }
+                    )
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val adapter = nfcAdapter ?: return
+        // 未起動時はマニフェストのintent-filterによるOS標準ディスパッチで起動されるが、
+        // フォアグラウンド中は既存タスクへ直接onNewIntent()で届けるためforegroundDispatchを使う
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, javaClass).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            flags
+        )
+        adapter.enableForegroundDispatch(this, pendingIntent, arrayOf(NfcTrigger.createIntentFilter()), null)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        nfcAdapter?.disableForegroundDispatch(this)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    private fun handleIncomingIntent(intent: Intent?) {
+        if (NfcTrigger.isTriggerIntent(intent)) {
+            nfcTriggerCount++
+        }
+    }
+
+    /**
+     * タグ書き込み画面用: 通常のタグディスパッチを介さず、次にかざされたタグを直接受け取る。
+     *
+     * FLAG_READER_SKIP_NDEF_CHECKは意図的に付けていない。このフラグはNDEF判定そのものを
+     * スキップするため、付けると未フォーマットのタグでNdef.get()だけでなくNdefFormatable.get()も
+     * 両方nullになり、「NDEF形式に対応していません」の誤判定を起こす(書き込み用途では判定が必要)。
+     */
+    private fun enableNfcWriteMode(onTagDiscovered: (Tag) -> Unit) {
+        val adapter = nfcAdapter ?: return
+        adapter.enableReaderMode(
+            this,
+            { tag -> runOnUiThread { onTagDiscovered(tag) } },
+            NfcAdapter.FLAG_READER_NFC_A or
+                NfcAdapter.FLAG_READER_NFC_B or
+                NfcAdapter.FLAG_READER_NFC_F or
+                NfcAdapter.FLAG_READER_NFC_V,
+            null
+        )
+    }
+
+    private fun disableNfcWriteMode() {
+        nfcAdapter?.disableReaderMode(this)
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun RecordScreen(repository: RecordRepository) {
+fun RecordScreen(
+    repository: RecordRepository,
+    nfcTriggerCount: Int = 0,
+    nfcAvailable: Boolean = false,
+    onEnableNfcWriteMode: ((onTagDiscovered: (Tag) -> Unit) -> Unit)? = null,
+    onDisableNfcWriteMode: (() -> Unit)? = null
+) {
     val pagerState = rememberPagerState(pageCount = { 3 }) // 0:記録一覧 1:今日の振り返り 2:ゴミ箱
     var editingRecord by remember { mutableStateOf<Record?>(null) }
+    var showTimeSelectDialog by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -173,10 +275,20 @@ fun RecordScreen(repository: RecordRepository) {
 
     val context = LocalContext.current
     var dayStartHour by remember { mutableStateOf(SettingsStore.getDayStartHour(context)) }
+    var weekStartDay by remember { mutableStateOf(SettingsStore.getWeekStartDay(context)) }
+    var monthStartDay by remember { mutableStateOf(SettingsStore.getMonthStartDay(context)) }
+    var monthStartDayRoundToNext by remember { mutableStateOf(SettingsStore.getMonthStartDayRoundToNext(context)) }
     var aiPromptTemplate by remember { mutableStateOf(SettingsStore.getAiPromptTemplate(context)) }
     var showSettingsDialog by remember { mutableStateOf(false) }
+    var showNfcWriteDialog by remember { mutableStateOf(false) }
     var backupFolderUri by remember { mutableStateOf(SettingsStore.getBackupFolderUri(context)) }
     var backupIntervalHours by remember { mutableStateOf(SettingsStore.getBackupIntervalHours(context)) }
+    // タグの表示名(5スロット固定。個数・並び順は変更不可で、名称のみここで編集する)
+    val tagLabels = remember {
+        mutableStateMapOf<String, String>().apply {
+            Record.TAG_SLOT_KEYS.forEach { slotKey -> put(slotKey, SettingsStore.getTagLabel(context, slotKey)) }
+        }
+    }
 
     // アプリ起動時、現在の設定に沿って自動バックアップの定期実行を確認する。
     // KEEPを使うことで、既に動いているタイマーを毎回リセットしない
@@ -210,6 +322,21 @@ fun RecordScreen(repository: RecordRepository) {
         }
     }
 
+    // NFCタグをかざした時の記録処理。ウィジェットタップと完全に同一の扱い
+    // (タグ〈分類ラベル〉は付与せず、記録時刻は現在時刻固定、manual_past扱いにもしない)。
+    // 初回コンポジション時(count=0)は発火させないよう、変化検知のみに使う
+    var lastHandledNfcTriggerCount by remember { mutableStateOf(0) }
+    LaunchedEffect(nfcTriggerCount) {
+        if (nfcTriggerCount != lastHandledNfcTriggerCount) {
+            lastHandledNfcTriggerCount = nfcTriggerCount
+            if (nfcTriggerCount > 0) {
+                repository.captureNow()
+                showSavedCheckmark = true
+                snackbarHostState.showSnackbar("NFCタグから記録しました", duration = SnackbarDuration.Short)
+            }
+        }
+    }
+
     LaunchedEffect(pagerState.currentPage) {
         listSelectedIds = emptySet()
         trashSelectedIds = emptySet()
@@ -229,10 +356,10 @@ fun RecordScreen(repository: RecordRepository) {
 
     val baseRecords by (
         dateFilter?.let { d ->
-            val (start, end) = if (dateFilterMode == DateFilterMode.MONTH) {
-                DateUtils.monthBoundsFromDatePickerUtcMillis(d)
-            } else {
-                DateUtils.dayBoundsFromDatePickerUtcMillis(d)
+            val (start, end) = when (dateFilterMode) {
+                DateFilterMode.MONTH -> DateUtils.logicalMonthBoundsFromDatePickerUtcMillis(d, dayStartHour, monthStartDay, monthStartDayRoundToNext)
+                DateFilterMode.WEEK -> DateUtils.logicalWeekBoundsFromDatePickerUtcMillis(d, dayStartHour, weekStartDay)
+                DateFilterMode.DAY -> DateUtils.dayBoundsFromDatePickerUtcMillis(d)
             }
             repository.observeForDay(start, end)
         } ?: repository.observeAll()
@@ -305,10 +432,11 @@ fun RecordScreen(repository: RecordRepository) {
         Scaffold(
             snackbarHost = {
                 SnackbarHost(snackbarHostState) { data ->
+                    // 濃色背景+明色文字の「Inverted」スタイル(強調が必要な一時的通知)
                     Snackbar(
-                        containerColor = LogRelayColors.Ink,
-                        contentColor = LogRelayColors.Paper,
-                        actionColor = LogRelayColors.Paper,
+                        containerColor = LogRelayColors.InvertedBg,
+                        contentColor = LogRelayColors.InvertedText,
+                        actionColor = LogRelayColors.InvertedText,
                         snackbarData = data
                     )
                 }
@@ -318,12 +446,7 @@ fun RecordScreen(repository: RecordRepository) {
                 // ウィジェットを使わずアプリ内からも記録を作れるようにするための手動追加ボタン。
                 if (pagerState.currentPage == 0 && !listSelectionMode) {
                     FloatingActionButton(
-                        onClick = {
-                            scope.launch {
-                                val record = repository.captureNow()
-                                editingRecord = record
-                            }
-                        },
+                        onClick = { showTimeSelectDialog = true },
                         containerColor = LogRelayColors.Indigo,
                         contentColor = LogRelayColors.Paper
                     ) {
@@ -492,6 +615,8 @@ fun RecordScreen(repository: RecordRepository) {
                                 onQueryChange = { searchQuery = it },
                                 dateFilter = dateFilter,
                                 dateFilterMode = dateFilterMode,
+                                dayStartHour = dayStartHour,
+                                weekStartDay = weekStartDay,
                                 onOpenPicker = { showDatePicker = true },
                                 onClearDate = { dateFilter = null },
                                 viewMode = viewModeTab0,
@@ -541,7 +666,7 @@ fun RecordScreen(repository: RecordRepository) {
                     state = pagerState,
                     modifier = Modifier.weight(1f).fillMaxWidth()
                 ) { page ->
-                    DotGridBackground(modifier = Modifier.fillMaxSize()) {
+                    Box(modifier = Modifier.fillMaxSize().background(LogRelayColors.Paper)) {
                         when (page) {
                             0 -> RecordListPage(
                                 records = tab0Records,
@@ -632,35 +757,86 @@ fun RecordScreen(repository: RecordRepository) {
         )
     }
 
+    if (showTimeSelectDialog) {
+        TimeSelectDialog(
+            dayStartHour = dayStartHour,
+            onDismiss = { showTimeSelectDialog = false },
+            onConfirm = { timestamp, isPastEntry ->
+                showTimeSelectDialog = false
+                scope.launch {
+                    val record = repository.captureManual(timestamp, isPastEntry)
+                    editingRecord = record
+                }
+            }
+        )
+    }
+
     if (showDatePicker) {
         val datePickerState = rememberDatePickerState(initialSelectedDateMillis = dateFilter)
+        fun applyFilter(mode: DateFilterMode) {
+            val selected = datePickerState.selectedDateMillis
+            if (selected != null) {
+                dateFilter = selected
+                dateFilterMode = mode
+                showDatePicker = false
+            }
+        }
         DatePickerDialog(
             onDismissRequest = { showDatePicker = false },
-            confirmButton = {
-                Row {
-                    TextButton(onClick = {
-                        val selected = datePickerState.selectedDateMillis
-                        if (selected != null) {
-                            dateFilter = selected
-                            dateFilterMode = DateFilterMode.MONTH
-                            showDatePicker = false
-                        }
-                    }) { Text("この月で絞り込む", color = LogRelayColors.Indigo) }
-                    TextButton(onClick = {
-                        val selected = datePickerState.selectedDateMillis
-                        if (selected != null) {
-                            dateFilter = selected
-                            dateFilterMode = DateFilterMode.DAY
-                            showDatePicker = false
-                        }
-                    }) { Text("この日で絞り込む", color = LogRelayColors.Indigo) }
-                }
-            },
+            confirmButton = {},
             dismissButton = {
                 TextButton(onClick = { showDatePicker = false }) { Text("キャンセル", color = LogRelayColors.InkFaint) }
             }
         ) {
-            DatePicker(state = datePickerState)
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                // title/headline(大きな見出しと日付テキスト入力)とモード切り替えの鉛筆アイコンは
+                // ここでは使わないため非表示にし、絞り込みボタンが最初の画面から見える高さを確保する
+                DatePicker(
+                    state = datePickerState,
+                    title = null,
+                    headline = null,
+                    showModeToggle = false
+                )
+                // カレンダーグリッドと絞り込みボタンの間に区切りと余白を確保し、
+                // 日付セルの数字とボタンのテキストが視覚的に重ならないようにする
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 8.dp)
+                        .height(1.dp)
+                        .background(LogRelayColors.PaperDot)
+                )
+                Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp)) {
+                    Text(
+                        "この期間で絞り込む",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = LogRelayColors.InkFaint,
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(
+                            "月" to DateFilterMode.MONTH,
+                            "週" to DateFilterMode.WEEK,
+                            "日" to DateFilterMode.DAY
+                        ).forEach { (label, mode) ->
+                            Text(
+                                text = label,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = LogRelayColors.Indigo,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { applyFilter(mode) }
+                                    .background(LogRelayColors.IndigoSoft, RoundedCornerShape(8.dp))
+                                    .padding(vertical = 10.dp)
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -677,7 +853,7 @@ fun RecordScreen(repository: RecordRepository) {
                         showPermanentDeleteConfirm = false
                         scope.launch { repository.hardDeleteMany(ids) }
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = LogRelayColors.Vermilion)
+                    colors = RelayButtonColors.primaryDestructive()
                 ) { Text("完全に削除") }
             },
             dismissButton = {
@@ -708,7 +884,7 @@ fun RecordScreen(repository: RecordRepository) {
                             }
                         }
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = LogRelayColors.Vermilion)
+                    colors = RelayButtonColors.primaryDestructive()
                 ) { Text("復元する") }
             },
             dismissButton = {
@@ -752,6 +928,119 @@ fun RecordScreen(repository: RecordRepository) {
                             dayStartHour = (dayStartHour + 1) % 24
                             SettingsStore.setDayStartHour(context, dayStartHour)
                         }) { Text("＋", color = LogRelayColors.Indigo, style = MaterialTheme.typography.titleLarge) }
+                    }
+
+                    Box(modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp).height(1.dp).background(LogRelayColors.PaperDot))
+
+                    Text(
+                        "週次/月次ダイジェストの基準日",
+                        color = LogRelayColors.Ink,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        "「週で絞り込む」「月で絞り込む」の範囲の基準になります(1日の区切り時刻も考慮されます)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = LogRelayColors.InkFaint,
+                        modifier = Modifier.padding(top = 2.dp, bottom = 12.dp)
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center, modifier = Modifier.fillMaxWidth()) {
+                        val weekDayLabels = listOf("日", "月", "火", "水", "木", "金", "土")
+                        TextButton(onClick = {
+                            weekStartDay = if (weekStartDay == Calendar.SUNDAY) Calendar.SATURDAY else weekStartDay - 1
+                            SettingsStore.setWeekStartDay(context, weekStartDay)
+                        }) { Text("－", color = LogRelayColors.Indigo, style = MaterialTheme.typography.titleLarge) }
+                        Text(
+                            text = "${weekDayLabels[weekStartDay - 1]}曜始まり",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = LogRelayColors.Indigo,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        )
+                        TextButton(onClick = {
+                            weekStartDay = if (weekStartDay == Calendar.SATURDAY) Calendar.SUNDAY else weekStartDay + 1
+                            SettingsStore.setWeekStartDay(context, weekStartDay)
+                        }) { Text("＋", color = LogRelayColors.Indigo, style = MaterialTheme.typography.titleLarge) }
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center,
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                    ) {
+                        TextButton(onClick = {
+                            monthStartDay = if (monthStartDay <= 1) 31 else monthStartDay - 1
+                            SettingsStore.setMonthStartDay(context, monthStartDay)
+                        }) { Text("－", color = LogRelayColors.Indigo, style = MaterialTheme.typography.titleLarge) }
+                        Text(
+                            text = "毎月%d日始まり".format(monthStartDay),
+                            style = MaterialTheme.typography.titleMedium,
+                            color = LogRelayColors.Indigo,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        )
+                        TextButton(onClick = {
+                            monthStartDay = if (monthStartDay >= 31) 1 else monthStartDay + 1
+                            SettingsStore.setMonthStartDay(context, monthStartDay)
+                        }) { Text("＋", color = LogRelayColors.Indigo, style = MaterialTheme.typography.titleLarge) }
+                    }
+                    // 29〜31日は月によって存在しないため、その場合だけ丸め方向の設定を表示する
+                    if (monthStartDay >= 29) {
+                        Text(
+                            "29日以降を選んだ場合、月によって実際の開始日が異なります",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = LogRelayColors.InkFaint,
+                            modifier = Modifier.padding(top = 10.dp)
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                            modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                        ) {
+                            listOf(false to "前の日に丸める", true to "次の日に丸める").forEach { (roundToNext, label) ->
+                                val selected = monthStartDayRoundToNext == roundToNext
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (selected) LogRelayColors.Paper else LogRelayColors.Indigo,
+                                    modifier = Modifier
+                                        .padding(horizontal = 4.dp)
+                                        .clickable {
+                                            monthStartDayRoundToNext = roundToNext
+                                            SettingsStore.setMonthStartDayRoundToNext(context, roundToNext)
+                                        }
+                                        .background(
+                                            if (selected) LogRelayColors.Indigo else LogRelayColors.IndigoSoft,
+                                            RoundedCornerShape(6.dp)
+                                        )
+                                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    Box(modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp).height(1.dp).background(LogRelayColors.PaperDot))
+
+                    Text(
+                        "タグの名称",
+                        color = LogRelayColors.Ink,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        "5個の分類ラベルの名称のみ変更できます(項目数・並び順は固定)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = LogRelayColors.InkFaint,
+                        modifier = Modifier.padding(top = 2.dp, bottom = 10.dp)
+                    )
+                    Record.TAG_SLOT_KEYS.forEach { slotKey ->
+                        OutlinedTextField(
+                            value = tagLabels[slotKey] ?: "",
+                            onValueChange = { newLabel ->
+                                tagLabels[slotKey] = newLabel
+                                SettingsStore.setTagLabel(context, slotKey, newLabel)
+                            },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                            textStyle = MaterialTheme.typography.bodySmall
+                        )
                     }
 
                     Box(modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp).height(1.dp).background(LogRelayColors.PaperDot))
@@ -839,17 +1128,51 @@ fun RecordScreen(repository: RecordRepository) {
                         Text(
                             "保存先フォルダが未設定のため、自動保存は行われません",
                             style = MaterialTheme.typography.bodySmall,
-                            color = LogRelayColors.Vermilion,
+                            color = LogRelayColors.InkFaint,
                             modifier = Modifier.padding(top = 6.dp)
                         )
+                    }
+
+                    if (nfcAvailable) {
+                        Box(modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp).height(1.dp).background(LogRelayColors.PaperDot))
+
+                        Text(
+                            "NFCタグ",
+                            color = LogRelayColors.Ink,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            "対応タグにかざすだけで、ウィジェットタップと同じ記録(タグなし・現在時刻)を作成できます",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = LogRelayColors.InkFaint,
+                            modifier = Modifier.padding(top = 2.dp, bottom = 6.dp)
+                        )
+                        Text(
+                            "動作は端末やメーカーによって異なる場合があります。一部の機種(Xiaomi等)では、" +
+                                "タグを検出した際にOS標準の確認画面が挟まることがありますが、その場合も操作を進めれば通常通り記録されます",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = LogRelayColors.InkFaint,
+                            modifier = Modifier.padding(bottom = 10.dp)
+                        )
+                        TextButton(onClick = { showNfcWriteDialog = true }) {
+                            Text("NFCタグに書き込む  ›", color = LogRelayColors.Indigo)
+                        }
                     }
                 }
             },
             confirmButton = {
-                Button(onClick = { showSettingsDialog = false }, colors = ButtonDefaults.buttonColors(containerColor = LogRelayColors.Indigo)) {
+                Button(onClick = { showSettingsDialog = false }, colors = RelayButtonColors.primary()) {
                     Text("閉じる")
                 }
             }
+        )
+    }
+
+    if (showNfcWriteDialog) {
+        NfcWriteDialog(
+            onEnableNfcWriteMode = onEnableNfcWriteMode,
+            onDisableNfcWriteMode = onDisableNfcWriteMode,
+            onDismiss = { showNfcWriteDialog = false }
         )
     }
 }
@@ -910,7 +1233,7 @@ private fun RecordListPage(
     // 例えば区切りが4時なら、深夜2時の記録は前日のグループに含まれる
     val groupedMap: Map<String, List<Record>> = if (grouped) {
         records
-            .groupBy { DateUtils.startOfLogicalDay(it.timestamp, dayStartHour) }
+            .groupBy { RelayLabDateUtils.startOfLogicalDay(it.timestamp, dayStartHour) }
             .toSortedMap(compareByDescending { it })
             .mapKeys { (dayStart, _) -> dayHeaderFormatter.format(Date(dayStart)) }
     } else {
@@ -1022,6 +1345,8 @@ private fun SearchAndDateBar(
     onQueryChange: (String) -> Unit,
     dateFilter: Long?,
     dateFilterMode: DateFilterMode,
+    dayStartHour: Int,
+    weekStartDay: Int,
     onOpenPicker: () -> Unit,
     onClearDate: () -> Unit,
     viewMode: ViewMode,
@@ -1061,10 +1386,14 @@ private fun SearchAndDateBar(
         if (dateFilter != null) {
             val dayFormatter = remember { SimpleDateFormat("yyyy/MM/dd", Locale.JAPAN).apply { timeZone = TimeZone.getTimeZone("UTC") } }
             val monthFormatter = remember { SimpleDateFormat("yyyy年M月", Locale.JAPAN).apply { timeZone = TimeZone.getTimeZone("UTC") } }
-            val label = if (dateFilterMode == DateFilterMode.MONTH) {
-                monthFormatter.format(Date(dateFilter))
-            } else {
-                dayFormatter.format(Date(dateFilter))
+            val weekRangeFormatter = remember { SimpleDateFormat("M/d", Locale.JAPAN) }
+            val label = when (dateFilterMode) {
+                DateFilterMode.MONTH -> monthFormatter.format(Date(dateFilter))
+                DateFilterMode.WEEK -> {
+                    val (start, end) = DateUtils.logicalWeekBoundsFromDatePickerUtcMillis(dateFilter, dayStartHour, weekStartDay)
+                    "${weekRangeFormatter.format(Date(start))}〜${weekRangeFormatter.format(Date(end))}"
+                }
+                DateFilterMode.DAY -> dayFormatter.format(Date(dateFilter))
             }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
@@ -1088,16 +1417,27 @@ private data class TabItem(val label: String, val weight: Float)
  */
 @Composable
 private fun WeightedTabRow(selectedIndex: Int, onTabSelected: (Int) -> Unit, tabs: List<TabItem>) {
-    Row(modifier = Modifier.fillMaxWidth().height(48.dp)) {
+    // タブ切り替えは選択式のUI要素のため、選択中のタブを境界線のみの「Outlined」スタイルで示す
+    Row(
+        modifier = Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 8.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
         tabs.forEachIndexed { index, tab ->
             val selected = index == selectedIndex
-            Column(
+            Box(
                 modifier = Modifier
                     .weight(tab.weight)
                     .fillMaxHeight()
+                    .clip(RoundedCornerShape(8.dp))
+                    .then(
+                        if (selected) {
+                            Modifier.border(1.dp, LogRelayColors.Indigo, RoundedCornerShape(8.dp))
+                        } else {
+                            Modifier
+                        }
+                    )
                     .clickable { onTabSelected(index) },
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
+                contentAlignment = Alignment.Center
             ) {
                 Text(
                     text = tab.label,
@@ -1107,13 +1447,6 @@ private fun WeightedTabRow(selectedIndex: Int, onTabSelected: (Int) -> Unit, tab
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(horizontal = 4.dp)
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(0.6f)
-                        .height(2.dp)
-                        .background(if (selected) LogRelayColors.Indigo else Color.Transparent)
                 )
             }
         }
@@ -1174,11 +1507,38 @@ private fun EmptyState(text: String, hint: String) {
     }
 }
 
-/** 位置情報の表示テキスト：地名キャッシュがあればそれを、なければ緯度経度を表示 */
-private fun locationDisplayText(record: Record): String = when {
-    record.placeName != null -> record.placeName
-    record.latitude != null && record.longitude != null -> "%.4f, %.4f".format(record.latitude, record.longitude)
-    else -> "位置情報なし"
+/**
+ * 位置情報の表示テキスト：地名キャッシュがあればそれを、なければ緯度経度を表示。
+ * 手動追加(＋ボタン)で過去の時刻を選んで記録した場合は、
+ * 「位置情報自体は記録操作を行った時点のものである」ことを示す注記を付け加える。
+ */
+private fun locationDisplayText(record: Record): String {
+    val base = when {
+        record.placeName != null -> record.placeName
+        record.latitude != null && record.longitude != null -> "%.4f, %.4f".format(record.latitude, record.longitude)
+        else -> "位置情報なし"
+    }
+    return if (record.isManualPast) "$base ※後から追加" else base
+}
+
+/** タグの表示名。未分類(tag=null)ならnull */
+private fun tagDisplayText(context: android.content.Context, record: Record): String? {
+    val slotKey = record.tag ?: return null
+    if (slotKey !in Record.TAG_SLOT_KEYS) return null
+    return SettingsStore.getTagLabel(context, slotKey)
+}
+
+/** 一覧でタグを軽く視認できる程度の小さなラベル表示(分類の可視化のみ。集計・絞り込みは行わない) */
+@Composable
+private fun TagChip(label: String, modifier: Modifier = Modifier) {
+    Text(
+        text = label,
+        style = MaterialTheme.typography.labelSmall,
+        color = LogRelayColors.Indigo,
+        modifier = modifier
+            .background(LogRelayColors.Indigo.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
+            .padding(horizontal = 6.dp, vertical = 1.dp)
+    )
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -1209,6 +1569,8 @@ private fun RecordCard(
     val formatter = remember { SimpleDateFormat("MM/dd HH:mm", Locale.JAPAN) }
     val timeText = formatter.format(Date(record.timestamp))
     val hasLocation = record.latitude != null && record.longitude != null
+    val context = LocalContext.current
+    val tagLabel = remember(record.tag) { tagDisplayText(context, record) }
 
     Card(
         shape = RoundedCornerShape(10.dp),
@@ -1225,7 +1587,16 @@ private fun RecordCard(
             Column(
                 modifier = Modifier.weight(1f).combinedClickable(onClick = onClick, onLongClick = onLongClick).padding(12.dp)
             ) {
-                Text(text = timeText, style = StampTextStyle)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(text = timeText, style = MonoLabelStyle)
+                    if (tagLabel != null) {
+                        TagChip(label = tagLabel)
+                    }
+                }
                 Spacer(modifier = Modifier.height(2.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (hasLocation) {
@@ -1306,6 +1677,8 @@ private fun RecordGridCard(
 
     val formatter = remember { SimpleDateFormat("MM/dd HH:mm", Locale.JAPAN) }
     val hasLocation = record.latitude != null && record.longitude != null
+    val context = LocalContext.current
+    val tagLabel = remember(record.tag) { tagDisplayText(context, record) }
 
     Box {
         Card(
@@ -1336,7 +1709,11 @@ private fun RecordGridCard(
                             PinIcon(tint = LogRelayColors.InkFaint, iconSize = 12.dp)
                             Spacer(modifier = Modifier.width(4.dp))
                         }
-                        Text(text = formatter.format(Date(record.timestamp)), style = StampTextStyle.copy(fontSize = 11.sp))
+                        Text(text = formatter.format(Date(record.timestamp)), style = MonoLabelStyle.copy(fontSize = 11.sp))
+                        if (tagLabel != null) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            TagChip(label = tagLabel)
+                        }
                     }
                     if (hasLocation) {
                         Text(
@@ -1406,7 +1783,7 @@ private fun TrashCard(record: Record, isSelected: Boolean, onToggleSelect: () ->
         Row(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Checkbox(checked = isSelected, onCheckedChange = { onToggleSelect() }, colors = CheckboxDefaults.colors(checkedColor = LogRelayColors.Indigo))
             Column(modifier = Modifier.weight(1f)) {
-                Text(text = timeText, style = StampTextStyle.copy(color = LogRelayColors.InkFaint))
+                Text(text = timeText, style = MonoLabelStyle.copy(color = LogRelayColors.InkFaint))
                 if (record.memo.isNotBlank()) {
                     Text(text = record.memo, style = MaterialTheme.typography.bodySmall, color = LogRelayColors.InkFaint)
                 }
@@ -1465,7 +1842,7 @@ private fun TrashGridCard(record: Record, isSelected: Boolean, onToggleSelect: (
                             PinIcon(tint = LogRelayColors.InkFaint, iconSize = 12.dp)
                             Spacer(modifier = Modifier.width(4.dp))
                         }
-                        Text(text = formatter.format(Date(record.timestamp)), style = StampTextStyle.copy(fontSize = 11.sp, color = LogRelayColors.InkFaint))
+                        Text(text = formatter.format(Date(record.timestamp)), style = MonoLabelStyle.copy(fontSize = 11.sp, color = LogRelayColors.InkFaint))
                     }
                     if (hasLocation) {
                         Text(
@@ -1535,6 +1912,161 @@ private fun buildClaudePrompt(record: Record, template: String): String {
         .replace("{memo}", memo)
 }
 
+private sealed class NfcWriteStatus {
+    data object Waiting : NfcWriteStatus()
+    data object Success : NfcWriteStatus()
+    data class Error(val message: String) : NfcWriteStatus()
+}
+
+/**
+ * NFCタグへの書き込みダイアログ。設定画面のさらに奥(一段深い階層)に配置している。
+ * 表示中はenableReaderModeで次にかざされたタグを直接受け取り、
+ * LogRelay独自MIMEタイプのトリガー用NDEFメッセージを書き込む。
+ * 通常のタグディスパッチ(記録トリガーとしての読み取り)とは独立した経路のため、
+ * この画面を開いている間に記録が作られてしまうことはない。
+ */
+@Composable
+private fun NfcWriteDialog(
+    onEnableNfcWriteMode: ((onTagDiscovered: (Tag) -> Unit) -> Unit)?,
+    onDisableNfcWriteMode: (() -> Unit)?,
+    onDismiss: () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    var status by remember { mutableStateOf<NfcWriteStatus>(NfcWriteStatus.Waiting) }
+
+    DisposableEffect(Unit) {
+        onEnableNfcWriteMode?.invoke { tag ->
+            scope.launch {
+                val result = NfcTrigger.writeTriggerTag(tag)
+                status = result.fold(
+                    onSuccess = { NfcWriteStatus.Success },
+                    onFailure = { e -> NfcWriteStatus.Error(e.message ?: "書き込みに失敗しました") }
+                )
+            }
+        }
+        onDispose { onDisableNfcWriteMode?.invoke() }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("NFCタグに書き込む") },
+        text = {
+            when (val s = status) {
+                is NfcWriteStatus.Waiting -> Text(
+                    "タグをスマートフォンの背面にかざしてください",
+                    color = LogRelayColors.InkFaint
+                )
+                is NfcWriteStatus.Success -> Text(
+                    "書き込みました。このタグにかざすと、ウィジェットタップと同じ記録ができます。",
+                    color = LogRelayColors.Indigo
+                )
+                is NfcWriteStatus.Error -> Text(s.message, color = LogRelayColors.Vermilion)
+            }
+        },
+        confirmButton = {
+            if (status is NfcWriteStatus.Error) {
+                TextButton(onClick = { status = NfcWriteStatus.Waiting }) {
+                    Text("もう一度試す", color = LogRelayColors.Indigo)
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(if (status is NfcWriteStatus.Success) "閉じる" else "キャンセル", color = LogRelayColors.InkFaint)
+            }
+        }
+    )
+}
+
+/**
+ * 「＋」ボタンからの手動追加で、記録する時刻を選ぶダイアログ。
+ * デフォルトは現在時刻。未来の時刻はガードして選べない。
+ * ピッカーの値を実際に動かした場合のみ「過去時刻を選んだ」とみなし、
+ * 動かさずそのまま確定した場合は(分単位のズレを避けるため)確定時点のSystem.currentTimeMillis()を使う。
+ *
+ * 日付そのものは選べない(時刻のみ)が、「1日の区切り時刻」(dayStartHour)設定と連動させる必要がある。
+ * 例: 区切りが4時の場合、深夜3時(＝論理的には「まだ昨日の続き」)にこのダイアログを開いても、
+ * 「20時」は前の晩(実カレンダー上は前日)を指すし、「1時」は今朝(実カレンダー上は当日)を指す。
+ * 選んだ時刻(hour)がdayStartHour以降なら論理日の開始日と同じ実カレンダー日、
+ * dayStartHour未満なら実カレンダー日としては+1日、として解決する。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TimeSelectDialog(
+    dayStartHour: Int,
+    onDismiss: () -> Unit,
+    onConfirm: (timestamp: Long, isPastEntry: Boolean) -> Unit
+) {
+    val initial = remember { Calendar.getInstance() }
+    val initialHour = remember { initial.get(Calendar.HOUR_OF_DAY) }
+    val initialMinute = remember { initial.get(Calendar.MINUTE) }
+    val timePickerState = rememberTimePickerState(
+        initialHour = initialHour,
+        initialMinute = initialMinute,
+        is24Hour = true
+    )
+    var isFutureError by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("記録する時刻") },
+        text = {
+            Column {
+                Text(
+                    text = "何時のことだった？(現在時刻までの範囲で選べます)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = LogRelayColors.InkFaint
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                TimePicker(state = timePickerState)
+                if (isFutureError) {
+                    Text(
+                        text = "未来の時刻は選べません",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val timeWasChanged = timePickerState.hour != initialHour || timePickerState.minute != initialMinute
+                    if (!timeWasChanged) {
+                        onConfirm(System.currentTimeMillis(), false)
+                        return@Button
+                    }
+                    val now = System.currentTimeMillis()
+                    // 論理日の開始時刻(=区切り時刻)を基準に、選んだhourが区切り時刻以降なら
+                    // 論理日の開始日と同じ実カレンダー日、区切り時刻未満なら実カレンダー日としては+1日とみなす
+                    val logicalDayStartCal = Calendar.getInstance().apply {
+                        timeInMillis = RelayLabDateUtils.startOfLogicalDay(now, dayStartHour)
+                    }
+                    val candidate = (logicalDayStartCal.clone() as Calendar).apply {
+                        if (timePickerState.hour < dayStartHour) {
+                            add(Calendar.DAY_OF_MONTH, 1)
+                        }
+                        set(Calendar.HOUR_OF_DAY, timePickerState.hour)
+                        set(Calendar.MINUTE, timePickerState.minute)
+                        set(Calendar.SECOND, 0)
+                        set(Calendar.MILLISECOND, 0)
+                    }
+                    if (candidate.timeInMillis > now) {
+                        isFutureError = true
+                        return@Button
+                    }
+                    isFutureError = false
+                    onConfirm(candidate.timeInMillis, true)
+                },
+                colors = RelayButtonColors.primary()
+            ) { Text("記録する") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("キャンセル", color = LogRelayColors.InkFaint) }
+        }
+    )
+}
+
 @Composable
 private fun MemoEditDialog(
     record: Record,
@@ -1548,6 +2080,10 @@ private fun MemoEditDialog(
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
     val hasLocation = record.latitude != null && record.longitude != null
+
+    // タグはメモの保存(確定ボタン)とは独立して、タップ時に即座に確定・保存する
+    // (写真の添付/削除と同じ扱い。タグ自体は分類ラベルであり、下書き中の値という概念を持たせない)
+    var localTag by remember(record.id) { mutableStateOf(record.tag) }
 
     // 写真パスをダイアログ内のローカル状態として持つ。
     // DBの更新(Flow経由)を待たず、添付・削除操作の直後にここを更新することで
@@ -1611,13 +2147,41 @@ private fun MemoEditDialog(
         text = {
             Column(modifier = Modifier.imePadding()) {
                 val formatter = remember { SimpleDateFormat("MM/dd HH:mm", Locale.JAPAN) }
-                Text(text = formatter.format(Date(record.timestamp)), style = StampTextStyle)
+                Text(text = formatter.format(Date(record.timestamp)), style = MonoLabelStyle)
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
                     if (hasLocation) {
                         PinIcon(tint = LogRelayColors.InkFaint)
                         Spacer(modifier = Modifier.width(3.dp))
                     }
                     Text(text = locationDisplayText(record), style = MaterialTheme.typography.bodySmall, color = LogRelayColors.InkFaint)
+                }
+                Row(
+                    modifier = Modifier
+                        .padding(top = 8.dp)
+                        .horizontalScroll(rememberScrollState())
+                ) {
+                    Record.TAG_SLOT_KEYS.forEach { slotKey ->
+                        val label = remember(slotKey) { SettingsStore.getTagLabel(context, slotKey) }
+                        val selected = localTag == slotKey
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (selected) LogRelayColors.Paper else LogRelayColors.Indigo,
+                            modifier = Modifier
+                                .padding(end = 6.dp)
+                                .background(
+                                    if (selected) LogRelayColors.Indigo else LogRelayColors.Indigo.copy(alpha = 0.12f),
+                                    RoundedCornerShape(4.dp)
+                                )
+                                .clickable {
+                                    // もう一度タップで選択解除(未分類に戻す)。1レコード1タグまでなので他は自動的に外れる
+                                    val newTag = if (selected) null else slotKey
+                                    localTag = newTag
+                                    scope.launch { repository.updateTag(record.id, newTag) }
+                                }
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
                 }
                 OutlinedTextField(
                     value = memoText,
@@ -1714,7 +2278,7 @@ private fun MemoEditDialog(
             }
         },
         confirmButton = {
-            Button(onClick = { onSave(memoText) }, colors = ButtonDefaults.buttonColors(containerColor = LogRelayColors.Indigo)) {
+            Button(onClick = { onSave(memoText) }, colors = RelayButtonColors.primary()) {
                 Text("保存")
             }
         },

@@ -1,15 +1,23 @@
 package com.logrelay.app.data
 
 import android.content.Context
+import android.database.sqlite.SQLiteConstraintException
 import android.net.Uri
 import com.logrelay.app.util.ExportHelper
 import com.logrelay.app.util.GeocodeHelper
 import com.logrelay.app.util.LocationHelper
 import com.logrelay.app.util.PhotoStorage
+import com.logrelay.app.wearprotocol.WearTrigger
 import java.util.concurrent.TimeUnit
 
 // ゴミ箱に入れた記録を何日間保持するか
 private const val TRASH_RETENTION_DAYS = 7L
+
+/** captureFromWatchの結果。AlreadyProcessedは異常系ではなく、DataItemの重複配送を示す正常な結果 */
+sealed class CaptureFromWatchResult {
+    data class Inserted(val record: Record) : CaptureFromWatchResult()
+    data object AlreadyProcessed : CaptureFromWatchResult()
+}
 
 class RecordRepository(context: Context) {
 
@@ -31,9 +39,68 @@ class RecordRepository(context: Context) {
         return record.copy(id = id)
     }
 
+    /**
+     * アプリ内「＋」ボタンからの手動追加。指定したtimestampで記録を作る。
+     * 位置情報は(ウィジェット経由のcaptureNowと同様)記録操作を行った時点＝現在地取得時点のものを使う。
+     * 選んだ時刻が過去の時刻の場合(isPastEntry=true)、位置情報欄への注記表示のためtagに印を付ける。
+     */
+    suspend fun captureManual(timestamp: Long, isPastEntry: Boolean): Record {
+        val location = LocationHelper.getCurrentLocationOrNull(appContext)
+        val record = Record(
+            timestamp = timestamp,
+            latitude = location?.latitude,
+            longitude = location?.longitude,
+            isManualPast = isPastEntry
+        )
+        val id = dao.insert(record)
+        return record.copy(id = id)
+    }
+
+    /**
+     * WearOSトリガー(DataClient経由)からの記録。ウィジェット/NFCと同様、新しい記録ロジックは作らず
+     * 既存のRecord/DAO/day-boundary処理をそのまま使う。ウォッチ側では記録ロジックを持たない。
+     *
+     * source="watch_gps"の場合のみ座標を採用する。それ以外(manual_pending、または座標が
+     * 欠落した不正なwatch_gps Payload)は位置なしで記録する。「後から追加」注記(isManualPast)は
+     * manual_pendingの場合のみ立てる(座標欠落は診断ログを残すのみで注記は立てない。既存の
+     * GPS取得失敗時の挙動と揃えるため)。
+     *
+     * sourceTriggerId(DataItemのUUID)にUNIQUE制約を持たせているため、同一DataItemの重複配送は
+     * SQLiteConstraintExceptionとして検出できる。呼び出し側(WearableListenerService)は
+     * AlreadyProcessedを異常系ではなく「既に処理済みなのでDataItemを削除してよい」という
+     * 正常な結果として扱うこと。
+     */
+    suspend fun captureFromWatch(
+        tapTime: Long,
+        source: String,
+        latitude: Double?,
+        longitude: Double?,
+        sourceTriggerId: String
+    ): CaptureFromWatchResult {
+        val hasValidWatchGps = source == WearTrigger.SOURCE_WATCH_GPS && latitude != null && longitude != null
+        val record = Record(
+            timestamp = tapTime,
+            latitude = if (hasValidWatchGps) latitude else null,
+            longitude = if (hasValidWatchGps) longitude else null,
+            isManualPast = source == WearTrigger.SOURCE_MANUAL_PENDING,
+            sourceTriggerId = sourceTriggerId
+        )
+        return try {
+            val id = dao.insert(record)
+            CaptureFromWatchResult.Inserted(record.copy(id = id))
+        } catch (e: SQLiteConstraintException) {
+            CaptureFromWatchResult.AlreadyProcessed
+        }
+    }
+
     suspend fun updateMemo(recordId: Long, memo: String) {
         val existing = dao.getById(recordId) ?: return
         dao.update(existing.copy(memo = memo))
+    }
+
+    /** 分類タグを設定/解除する。tag=nullで未分類に戻す */
+    suspend fun updateTag(recordId: Long, tag: String?) {
+        dao.updateTag(recordId, tag)
     }
 
     fun observeAll() = dao.observeAll()
@@ -127,11 +194,13 @@ class RecordRepository(context: Context) {
     /**
      * バックアップZIPから復元する。既存データ(写真含む)は全て消え、バックアップの内容で置き換わる。
      * 呼び出し元で必ず「上書きされる」ことをユーザーに確認してから呼ぶこと。
+     *
+     * ZIPの読み出しを先に済ませてからDBへ触る。ZIPが壊れていて例外になった時点では
+     * まだ既存データに手を付けていないため、復元に失敗しても元のデータが残る。
      */
     suspend fun restoreFromBackupZip(inputStream: java.io.InputStream) {
         val records = com.logrelay.app.util.BackupHelper.readZip(appContext, inputStream)
-        dao.deleteAllRaw()
-        dao.insertAll(records)
+        dao.replaceAll(records)
     }
 
     companion object {

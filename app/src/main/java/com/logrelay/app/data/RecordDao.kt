@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
@@ -46,6 +47,9 @@ interface RecordDao {
     @Query("UPDATE records SET placeName = :placeName WHERE id = :id")
     suspend fun updatePlaceName(id: Long, placeName: String)
 
+    @Query("UPDATE records SET tag = :tag WHERE id = :id")
+    suspend fun updateTag(id: Long, tag: String?)
+
     @Query("UPDATE records SET photoPath = :photoPath WHERE id = :id")
     suspend fun updatePhotoPath(id: Long, photoPath: String?)
 
@@ -59,6 +63,19 @@ interface RecordDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(records: List<Record>)
+
+    /**
+     * バックアップ復元の本体。全消去と挿入を1トランザクションにまとめる。
+     *
+     * 分けて呼ぶと、途中でプロセスが落ちたり挿入が失敗した場合に「既存データは消えたが
+     * 復元データも入っていない」空のDBが残ってしまう。トランザクションにしておけば
+     * 失敗時は自動でロールバックされ、復元前の状態が保たれる。
+     */
+    @Transaction
+    suspend fun replaceAll(records: List<Record>) {
+        deleteAllRaw()
+        insertAll(records)
+    }
 
     // ゴミ箱からの「完全に削除」。ユーザーが明示的に選択した場合のみ呼ばれる
     @Query("DELETE FROM records WHERE id IN (:ids)")

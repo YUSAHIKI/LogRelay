@@ -70,7 +70,7 @@ fun BoxScope.EdgeScrollbar(listState: LazyListState, totalItemCount: Int) {
                 .fillMaxHeight(thumbHeightFraction)
                 .width(4.dp)
                 .offset { IntOffset(-6, (trackHeightPx * scrollFraction).roundToInt()) }
-                .background(LogRelayColors.Indigo.copy(alpha = 0.45f), RoundedCornerShape(2.dp))
+                .background(LogRelayColors.InkFaint.copy(alpha = 0.5f), RoundedCornerShape(2.dp))
         )
     }
 }
@@ -119,7 +119,7 @@ fun BoxScope.EdgeScrollbarGrid(gridState: LazyGridState, totalItemCount: Int) {
                 .fillMaxHeight(thumbHeightFraction)
                 .width(4.dp)
                 .offset { IntOffset(-6, (trackHeightPx * scrollFraction).roundToInt()) }
-                .background(LogRelayColors.Indigo.copy(alpha = 0.45f), RoundedCornerShape(2.dp))
+                .background(LogRelayColors.InkFaint.copy(alpha = 0.5f), RoundedCornerShape(2.dp))
         )
     }
 }

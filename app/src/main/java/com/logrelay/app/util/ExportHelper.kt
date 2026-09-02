@@ -40,7 +40,7 @@ object ExportHelper {
             sb.append(csvField(timeFormatter.format(Date(record.timestamp)))).append(",")
             sb.append(csvField(record.latitude?.toString() ?: "")).append(",")
             sb.append(csvField(record.longitude?.toString() ?: "")).append(",")
-            sb.append(csvField(record.placeName ?: "")).append(",")
+            sb.append(csvField(placeNameLabel(record))).append(",")
             sb.append(csvField(record.memo))
             sb.append("\n")
         }
@@ -52,10 +52,24 @@ object ExportHelper {
         return "\"$escaped\""
     }
 
-    private fun locationLabel(record: Record): String = when {
-        record.placeName != null -> record.placeName
-        record.latitude != null && record.longitude != null -> "(${record.latitude}, ${record.longitude})"
-        else -> ""
+    // AIへの受け渡しを見据え、手動追加(＋ボタン)で過去の時刻を選んだ記録には
+    // 「位置情報は記録操作時点のもの」であることが伝わるよう、書き出し内容にも注記を含める
+    private fun manualPastSuffix(record: Record): String = if (record.isManualPast) " ※後から追加" else ""
+
+    private fun locationLabel(record: Record): String {
+        val base = when {
+            record.placeName != null -> record.placeName
+            record.latitude != null && record.longitude != null -> "(${record.latitude}, ${record.longitude})"
+            else -> ""
+        }
+        val suffix = manualPastSuffix(record)
+        return if (suffix.isEmpty()) base else "$base$suffix".trim()
+    }
+
+    private fun placeNameLabel(record: Record): String {
+        val base = record.placeName ?: ""
+        val suffix = manualPastSuffix(record)
+        return if (suffix.isEmpty()) base else "$base$suffix".trim()
     }
 
     /** バックアップ用：全カラムをそのままJSON化する(削除済みも含めて完全復元できるように) */
@@ -74,6 +88,8 @@ object ExportHelper {
             // 絶対パスはバックアップ先の端末で意味を持たないため、ファイル名だけを保存する。
             // 実体はZIP内のphotos/フォルダに同梱される
             obj.put("photoPath", r.photoPath?.let { java.io.File(it).name } ?: JSONObject.NULL)
+            obj.put("isManualPast", r.isManualPast)
+            obj.put("sourceTriggerId", r.sourceTriggerId ?: JSONObject.NULL)
             array.put(obj)
         }
         val root = JSONObject()
@@ -99,7 +115,9 @@ object ExportHelper {
                     memo = obj.optString("memo", ""),
                     deletedAt = if (obj.isNull("deletedAt")) null else obj.getLong("deletedAt"),
                     placeName = if (obj.isNull("placeName")) null else obj.getString("placeName"),
-                    photoPath = if (obj.isNull("photoPath")) null else obj.getString("photoPath")
+                    photoPath = if (obj.isNull("photoPath")) null else obj.getString("photoPath"),
+                    isManualPast = obj.optBoolean("isManualPast", false),
+                    sourceTriggerId = if (obj.isNull("sourceTriggerId")) null else obj.getString("sourceTriggerId")
                 )
             )
         }

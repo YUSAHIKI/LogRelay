@@ -12,17 +12,20 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
-/** 写真添付済みであることを示す簡易カメラアイコン */
+/**
+ * 写真添付済みであることを示す簡易カメラアイコン。
+ * 線の太さ(1.6dp)は他のアイコン(ListViewIcon等)と揃えている。
+ */
 @Composable
 fun CameraIcon(tint: Color, modifier: Modifier = Modifier, iconSize: Dp = 13.dp) {
     Canvas(modifier = modifier.size(iconSize)) {
-        val strokeWidth = 1.3.dp.toPx()
+        val strokeWidth = 1.6.dp.toPx()
         val bodyTop = size.height * 0.28f
         drawRoundRect(
             color = tint,
             topLeft = Offset(0f, bodyTop),
             size = Size(size.width, size.height - bodyTop),
-            cornerRadius = CornerRadius(1.5.dp.toPx()),
+            cornerRadius = CornerRadius(2.dp.toPx()),
             style = Stroke(width = strokeWidth)
         )
         // 上部のファインダー突起
@@ -30,7 +33,7 @@ fun CameraIcon(tint: Color, modifier: Modifier = Modifier, iconSize: Dp = 13.dp)
             color = tint,
             topLeft = Offset(size.width * 0.32f, 0f),
             size = Size(size.width * 0.36f, bodyTop * 0.9f),
-            cornerRadius = CornerRadius(1.dp.toPx()),
+            cornerRadius = CornerRadius(1.2.dp.toPx()),
             style = Stroke(width = strokeWidth)
         )
         // レンズ

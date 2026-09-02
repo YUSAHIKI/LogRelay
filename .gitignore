@@ -6,6 +6,10 @@
 **/captures/
 **/app/release/
 
+# 別名Gradle user home(GRADLE_USER_HOME等で.gradleとは別名で作られるケース)。
+# **/.gradle/ は「.gradle」という名前にしかマッチしないため、これは別途除外が必要。
+.gradle-user/
+
 *.iml
 .DS_Store
 

@@ -1,3 +1,9 @@
 <resources>
-    <style name="Theme.LogRelay" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- 背景が明色(Neutral #F9F9F8)のため、ステータスバー/ナビゲーションバーのアイコンは
+         暗色側にする必要がある。これを指定しないと、白背景に白アイコンが重なって見えなくなる
+         (Pixel等、targetSdk 35+のedge-to-edge強制が効く端末で顕著)。 -->
+    <style name="Theme.LogRelay" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
 </resources>

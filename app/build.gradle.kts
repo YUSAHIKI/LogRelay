@@ -15,8 +15,9 @@ android {
         applicationId = "com.logrelay.app"
         minSdk = 26 // Glance実用上の現実的な下限
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0-mvp"
+        versionCode = 2
+        versionName = "0.2.0-alpha"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     // 署名情報は keystore.properties(Gitに含めない)から読み込む。
@@ -76,6 +77,11 @@ android {
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.14"
     }
+
+    // MigrationTestHelperが実行時にスキーマ履歴を参照できるよう、androidTestのassetsとして含める
+    sourceSets {
+        getByName("androidTest").assets.srcDirs("$projectDir/schemas")
+    }
 }
 
 // Roomのスキーマ変更履歴をJSONとして書き出す設定。
@@ -85,6 +91,11 @@ ksp {
 }
 
 dependencies {
+    // RelayLabCommon (PhotoRelayと共有するday-boundary判定ロジック。git submodule)
+    implementation(project(":relaylab-common"))
+    // WearOSトリガーのプロトコル定数(:wearと共有)
+    implementation(project(":wear-protocol"))
+
     // Core / Compose (本体アプリの一覧・振り返り画面用)
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.0")
@@ -111,10 +122,19 @@ dependencies {
     // 位置情報（ワンタップ取得用）
     implementation("com.google.android.gms:play-services-location:21.3.0")
 
+    // WearOSトリガー機能: wearモジュールからのDataClient受信(WearableListenerService)
+    implementation("com.google.android.gms:play-services-wearable:20.0.1")
+
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // ローカル自動バックアップ(定期実行・フォルダへの書き込み)
     implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("androidx.documentfile:documentfile:1.0.1")
+
+    // Room Migrationの検証用(MigrationTestHelper)。実行には実機/エミュレータでの
+    // connectedAndroidTestが必要(この開発環境には接続済みの端末がない)。
+    androidTestImplementation("androidx.room:room-testing:2.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
 }

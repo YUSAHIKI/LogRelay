@@ -15,3 +15,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "QuickLogWidget"
 include(":app")
+include(":wear")
+include(":wear-protocol")
+include(":relaylab-common")
+project(":relaylab-common").projectDir = file("common/relaylab-common")

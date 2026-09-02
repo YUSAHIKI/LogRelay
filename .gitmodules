@@ -1,0 +1,3 @@
+[submodule "common/relaylab-common"]
+	path = common/relaylab-common
+	url = https://github.com/YUSAHIKI/RelayLabCommon.git

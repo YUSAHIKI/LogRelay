@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-feature android:name="android.hardware.type.watch" />
+
+    <!-- ウォッチ内蔵GPSでのFix取得用。拒否されてもmanual_pendingにフォールバックする -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.LogRelayWear"
+        android:supportsRtl="true">
+
+        <!-- フォン版アプリが未インストールでも単独で起動できるようにする。
+             ただし記録処理自体はフォン側で行うため、フォン版なしでは送信したトリガーが
+             処理されないまま溜まるだけになる(DataClientのローカル保持・再接続時同期に委ねる)。 -->
+        <meta-data
+            android:name="com.google.android.wearable.standalone"
+            android:value="true" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- ホーム画面のタイル。画面オン・アクティブ状態でのタップのみ受け付ける(Tileの仕様上、常にそう) -->
+        <service
+            android:name=".LogRelayTileService"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="com.google.android.wearable.permission.BIND_TILE_PROVIDER">
+            <intent-filter>
+                <action android:name="androidx.wear.tiles.action.BIND_TILE_PROVIDER" />
+            </intent-filter>
+            <!-- タイル選択画面用のプレビュー画像(androidx.wear.tiles.PREVIEW)は
+                 デザイン未確定のため今回は設定していない。追加時はここにmeta-dataを足す -->
+        </service>
+
+    </application>
+</manifest>
